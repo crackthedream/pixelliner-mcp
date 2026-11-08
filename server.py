@@ -966,6 +966,91 @@ def t_lint(a):
     return [text(json.dumps(res, indent=1))]
 
 
+def t_compare_reference(a):
+    """Compare the drawing (all visible non-reference layers) with a reference layer: an image with the drawing,
+    the reference and a mismatch map side by side, plus the grid cells that differ most."""
+    doc = doc_or_fail(a.get("canvas"))
+    if a.get("layer") is not None:
+        ri = doc.layer_index(a["layer"])
+    else:
+        refs = [i for i, l in enumerate(doc.layers) if l.reference]
+        if not refs:
+            raise ValueError("no reference layer: import one with import_reference {into: 'layer'}")
+        ri = refs[0]
+    f = doc.frame_index(a.get("frame"))
+    w, h = doc.w, doc.h
+    draw_px = doc.composite(frame=f)
+    ref_px = doc.cel(ri, f)
+    cell = max(2, int(a.get("cell", 8)))
+    labc = {}
+
+    def lab(c):
+        v = labc.get(c)
+        if v is None:
+            v = labc[c] = art.rgb_to_lab(c)
+        return v
+
+    mism = bytearray(w * h * 4)
+    cells = {}
+    tot_missing = tot_extra = 0
+    for y in range(h):
+        for x in range(w):
+            i = (y * w + x) * 4
+            do, ro = draw_px[i + 3] > 0, ref_px[i + 3] > 0
+            c = cells.setdefault((x // cell, y // cell), {"missing": 0, "extra": 0, "de": 0.0, "dl": 0.0, "n": 0})
+            if ro and not do:
+                c["missing"] += 1
+                tot_missing += 1
+                mism[i:i + 4] = bytes((230, 40, 40, 255))
+            elif do and not ro:
+                c["extra"] += 1
+                tot_extra += 1
+                mism[i:i + 4] = bytes((40, 90, 230, 255))
+            elif do and ro:
+                A, B = lab(tuple(draw_px[i:i + 3])), lab(tuple(ref_px[i:i + 3]))
+                de = ((A[0] - B[0]) ** 2 + (A[1] - B[1]) ** 2 + (A[2] - B[2]) ** 2) ** 0.5
+                c["de"] += de
+                c["dl"] += A[0] - B[0]
+                c["n"] += 1
+                g = int(min(255, de * 900))
+                mism[i:i + 4] = bytes((max(60, g), max(60, g), 40, 255)) if de > 0.08 else bytes((70, 70, 70, 255))
+    fid = art.fidelity(w, h, draw_px, ref_px)
+    ranked = []
+    for (cx, cy), c in cells.items():
+        de = c["de"] / c["n"] if c["n"] else 0.0
+        score = c["missing"] + c["extra"] + (de - 0.06) * c["n"] * 8 if de > 0.06 else c["missing"] + c["extra"]
+        if score <= 0.5:
+            continue
+        notes = []
+        if c["missing"]:
+            notes.append(f"{c['missing']} px missing (reference has pixels here)")
+        if c["extra"]:
+            notes.append(f"{c['extra']} px extra (outside the reference shape)")
+        if de > 0.06 and c["n"]:
+            dl = c["dl"] / c["n"]
+            notes.append(f"colour off dE {de:.2f}" + (" (too light)" if dl > 0.04 else " (too dark)" if dl < -0.04 else " (hue/saturation)"))
+        ranked.append((score, cx * cell, cy * cell, notes))
+    ranked.sort(reverse=True)
+    lines = [f"compared drawing with reference layer #{ri} '{doc.layers[ri].name}' (frame {f}):",
+             f"overall: colour distance {fid['delta_e']:.3f} (blurred OKLab; lower = closer), "
+             f"{tot_missing} px missing, {tot_extra} px extra",
+             f"worst {cell}x{cell} cells (x, y, w, h):"]
+    for score, x, y, notes in ranked[:int(a.get("top", 8))]:
+        lines.append(f"  [{x}, {y}, {min(cell, w - x)}, {min(cell, h - y)}]: " + "; ".join(notes))
+    if not ranked:
+        lines.append("  none: the drawing matches the reference closely")
+    gap = 2
+    W = w * 3 + gap * 2
+    combo = bytearray(W * h * 4)
+    for y in range(h):
+        for k, src in enumerate((draw_px, ref_px, mism)):
+            o = (y * W + k * (w + gap)) * 4
+            combo[o:o + w * 4] = src[y * w * 4:(y + 1) * w * 4]
+    png, s = render_preview(doc, a.get("scale"), False, None, None, "checker", flat=combo, size=(W, h))
+    lines.append(f"image: drawing | reference | mismatch (red = missing, blue = extra, yellow = colour off) at {s}x")
+    return [text("\n".join(lines)), image(png)]
+
+
 def t_open_in_pixelliner(a):
     path = a.get("path")
     if not path:
@@ -1179,6 +1264,18 @@ TOOLS = [
         }},
     },
     {
+        "name": "compare_reference",
+        "description": "Compare your drawing (all visible non-reference layers) with the reference layer: returns an image "
+                       "(drawing | reference | mismatch map: red = missing, blue = extra, yellow = colour off) and the grid "
+                       "cells that differ most, with what is wrong in each. Use it to check proportions and colours while drawing.",
+        "inputSchema": {"type": "object", "properties": {
+            "layer": {"anyOf": [{"type": "integer"}, {"type": "string"}], "description": "Reference layer (default: first reference layer)."},
+            "cell": {"type": "integer", "minimum": 2, "description": "Cell size for the problem list (default 8)."},
+            "top": {"type": "integer", "description": "How many problem cells to list (default 8)."},
+            "scale": {"type": "integer"}, "frame": {"type": "integer"}, "canvas": {"type": "string"},
+        }},
+    },
+    {
         "name": "open_in_pixelliner",
         "description": "Launch PixelLiner with an exported PNG or GIF (default: the current canvas's last export). Only when the user wants to see/edit it in PixelLiner. If PixelLiner is already running it shows an import dialog (New Character / New Pose / New Frame) for the user to choose.",
         "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}},
@@ -1190,6 +1287,7 @@ HANDLERS = {
     "draw": t_draw, "layer": t_layer, "frame": t_frame, "view": t_view, "undo": t_undo, "redo": t_redo,
     "export": t_export, "open_in_pixelliner": t_open_in_pixelliner,
     "save_project": t_save_project, "load_project": t_load_project, "lint": t_lint,
+    "compare_reference": t_compare_reference,
 }
 
 INSTRUCTIONS = """Headless pixel-art canvas for PixelLiner. Workflow: new_canvas (or open_image) -> palette -> draw (batch many ops; pixel_map rows are the fastest way to lay down a sprite) -> view to check -> fix with draw/undo -> export (PNG). Use layers for outline/colour/shading separation. Use view mode 'grid' for exact pixel coordinates.
