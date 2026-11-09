@@ -85,7 +85,9 @@ def _lzw(indices, min_code_size):
 
 
 def encode_gif(w, h, frames, durations_ms, loop=0):
-    """frames: list of RGBA bytearrays (w*h*4). Returns (gif_bytes, exact_colors: bool)."""
+    """frames: list of RGBA bytearrays (w*h*4). Returns (gif_bytes, exact_colors: bool).
+    loop: 0 = forever; n = repeat n more times; None = play once (no NETSCAPE block: the one form every player
+    reads as a single playback, since players disagree on what a count of 1 means)."""
     palette, indexed, exact = _quantize(frames)
     size_bits = max(1, (len(palette) - 1).bit_length())
     table_len = 1 << size_bits
@@ -98,7 +100,8 @@ def encode_gif(w, h, frames, durations_ms, loop=0):
     out = bytearray(b"GIF89a")
     out += struct.pack("<HHBBB", w, h, 0x80 | 0x70 | (size_bits - 1), 0, 0)
     out += pal
-    out += b"\x21\xFF\x0BNETSCAPE2.0\x03\x01" + struct.pack("<H", loop) + b"\x00"
+    if loop is not None:
+        out += b"\x21\xFF\x0BNETSCAPE2.0\x03\x01" + struct.pack("<H", loop) + b"\x00"
     for idx, ms in zip(indexed, durations_ms):
         delay = max(2, int(round(ms / 10.0)))
         # disposal 2 (restore to background) so transparent areas don't accumulate; index 0 transparent
