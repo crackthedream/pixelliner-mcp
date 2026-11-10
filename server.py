@@ -407,6 +407,8 @@ ART_OPS = {
     "quantize": op_quantize, "selout": op_selout, "antialias": op_antialias, "aa": op_antialias,
     "cleanup": op_cleanup, "shade": op_shade, "transform": op_transform,
 }
+from face_kit import FACE_OPS  # noqa: E402  anime-style eyes, mouth, brows, blush (see face_kit.py)
+ART_OPS.update(FACE_OPS)
 
 
 # ---------------------------------------------------------------- tool handlers
@@ -1086,6 +1088,12 @@ Technique ops (whole layer, or limit with x,y,w,h). 'snap' (default: true when t
 - cleanup {doubles?=true, orphans?=true, orphan_min?=6} -- pixel-perfect pass: removes L-shaped doubled corners in 1px lines and isolated stray pixels.
 - quantize {palette?:[colors], dither?:ordered, strength?} -- snap every pixel to the palette.
 - transform {x?,y?,w?,h? (source region, default whole layer), dx?,dy?, rotate?:deg, scale?:n|[sx,sy], flip_x?, flip_y?, copy?, from_frame?, from_layer?, smooth?=true} -- move/copy a region with optional RotSprite rotation (clean pixel-art rotation). From another frame/layer it copies; within the same layer it moves unless copy=true. Great for in-betweens: copy a limb from the previous frame and rotate it a few degrees.
+Face kit (anime-style pixel-art faces; clean, symmetric parts -- use these rather than placing eye pixels by hand):
+- eyes {cx, y, size: s(3x3)|m(5x4)|l(6x5)|xl(7x6)|xxl(9x7), style: open|half|happy|closed|wide|sad|angry|wink_left|wink_right, turn?: front|left|right (three-quarter face: the eye on the side the face turns toward is drawn narrower), gap? (px between the eyes, default a little under one eye width), iris, iris_dark?, iris_light?, lash?, highlight?, white?, skin?} -- a mirror-symmetric pair centred on cx, top row at y, built like hand-made anime sprites: taller than wide: a dark lash on top that continues down the outer side as a wing, a soft white inside that corner, the iris body under the lash with the pupil low and toward the nose, lighter at the bottom, no lower outline. Size by face width: s under ~12 px, m ~12-15, l ~16-18, xl ~19-21, xxl 22+ (or use the measured layout you are given). Expression lives in the lash: half = lowered (calm, smug, sleepy), sad = slanting up to the inner end, angry = slanting down to the inner end, happy = ^ arcs, closed = soft line, wide = surprised (more white).
+- mouth {cx, y, shape: none|dot|line|smile|smile_wide|open_smile|open_wide|o|frown|cat, color?, inner?, skin?} -- small and soft, centred on cx, top row y. Colours default to the skin darkened (lines) or warmed to salmon (open mouths) -- never a dark outline. Calm faces in this style often have no mouth or a 1-2 px line.
+- brows {cx, y, gap?, shape: flat|raised|angry|worried|soft, color, soft?=true} -- a mirrored pair of faint 1-px brows (softened into the skin), inner ends gap px apart. In this style brows are usually hidden by the fringe: leave them out unless the concept clearly shows them.
+- skin {x, y, w, h, skin?, tolerance?=0.16} -- flatten the face: near-skin pixels in the box (blotches, specks, uneven trace shading) become exactly the skin colour; hair, outline and features stay.
+- blush {cx, y, gap?, width?, color} -- two short blush marks mirrored around cx.
 """ + COLOR_DOC
 
 TOOLS = [
