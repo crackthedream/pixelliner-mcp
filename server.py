@@ -24,7 +24,7 @@ from gif import encode_gif  # noqa: E402
 import art  # noqa: E402
 
 SERVER_NAME = "pixelliner"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
 OUTPUT_DIR = os.environ.get("PIXELLINER_MCP_OUT") or os.path.join(os.path.expanduser("~"), "Documents", "PixelLinerMCP")
@@ -113,9 +113,9 @@ def sheet_rgba(doc, frames, columns=None, gap=0, region=None, layer=None, previe
     return W, H, out
 
 
-def onion_rgba(doc, region, layer, frame, alpha=0.3):
+def onion_rgba(doc, region, layer, frame, alpha=0.3, include_reference=True):
     """Current frame with the previous frame ghosted underneath where the current frame is empty."""
-    cur = doc.composite(region, only_layer=layer, frame=frame, include_reference=True)
+    cur = doc.composite(region, only_layer=layer, frame=frame, include_reference=include_reference)
     prev = doc.composite(region, only_layer=layer, frame=(frame - 1) % doc.nframes)
     for i in range(0, len(cur), 4):
         if cur[i + 3] == 0 and prev[i + 3]:
@@ -168,14 +168,19 @@ def render_preview(doc, scale=None, grid=None, region=None, layer=None, backgrou
     return encode_png(W, H, out), scale
 
 
-def render_grid(doc, region=None, layer=None):
+class GridColorLimit(ValueError):
+    """A single-character legend cannot represent every colour in the region."""
+
+
+def render_grid(doc, region=None, layer=None, include_reference=False):
     x, y, w, h = region or (0, 0, doc.w, doc.h)
     if w > 160:
         raise ValueError("grid view is limited to 160 columns; pass x/y/width/height to view a region")
-    flat = doc.composite((x, y, w, h), only_layer=layer)
+    flat = doc.composite((x, y, w, h), only_layer=layer, include_reference=include_reference)
+    visible = {tuple(flat[i:i+4]) for i in range(0, len(flat), 4) if flat[i+3]}
     by_color = {}
     for k, v in doc.palette.items():
-        if len(k) == 1 and k != "." and v not in by_color:
+        if len(k) == 1 and k != "." and v in visible and v not in by_color:
             by_color[v] = k
     used_chars = set(by_color.values()) | {"."}
     pool = [c for c in GRID_CHARS if c not in used_chars]
@@ -192,7 +197,7 @@ def render_grid(doc, region=None, layer=None):
             ch = by_color.get(c)
             if ch is None:
                 if not pool:
-                    raise ValueError("too many distinct colors for grid view; use mode 'image' or a smaller region")
+                    raise GridColorLimit("too many distinct colours for an exact text grid")
                 ch = pool.pop(0)
                 by_color[c] = ch
             legend[ch] = c
@@ -634,7 +639,7 @@ def t_import_reference(a):
             for k, c in zip(assign_keys(doc, None, len(cols)), cols):
                 doc.palette[k] = tuple(c) + (255,)
         notes.append(f"auto palette of {len(cols)} colours added to the canvas palette")
-    elif pal_spec in PRESET_PALETTES:
+    elif isinstance(pal_spec, str) and pal_spec in PRESET_PALETTES:
         if into != "layer":
             doc.load_preset(pal_spec)
         cols = [tuple(int(hx[i:i + 2], 16) for i in (0, 2, 4)) for hx in PRESET_PALETTES[pal_spec]]
@@ -797,18 +802,25 @@ def t_view(a):
     r = region or (0, 0, doc.w, doc.h)
     layer = doc.layer_index(a["layer"]) if a.get("layer") is not None else None
     bg = a.get("background", "checker")
+    overlay = a.get("include_reference", True)
+    label = ""
+    if layer is None and any(l.reference and l.visible for l in doc.layers):
+        label = " (reference overlay enabled)" if overlay else " (artwork only)"
     if a.get("frames") is not None:  # several frames side by side, left to right
         fl = frame_list(doc, a.get("frames"))
-        W, H, flat = sheet_rgba(doc, fl, a.get("columns"), 1, region, layer, preview=True)
+        W, H, flat = sheet_rgba(doc, fl, a.get("columns"), 1, region, layer, preview=overlay)
         scale = a.get("scale") or max(1, min(16, 960 // max(W, 1), 640 // max(H, 1)))
         png, s = render_preview(doc, scale, a.get("grid", False), None, None, bg, flat=flat, size=(W, H))
-        return [text(f"frames {fl} of '{doc.name}' left-to-right (1px gap between frames) at {s}x zoom"), image(png)]
+        return [text(f"frames {fl} of '{doc.name}' left-to-right (1px gap between frames) at {s}x zoom" + label), image(png)]
     f = doc.frame_index(a.get("frame"))
     out = []
     if mode in ("image", "both"):
-        flat = onion_rgba(doc, r, layer, f) if a.get("onion") and doc.nframes > 1 else doc.composite(r, layer, f, include_reference=True)
+        if a.get("onion") and doc.nframes > 1:
+            flat = onion_rgba(doc, r, layer, f, include_reference=overlay)
+        else:
+            flat = doc.composite(r, layer, f, include_reference=overlay)
         png, s = render_preview(doc, a.get("scale"), a.get("grid"), r, None, bg, flat=flat)
-        out.append(text(f"preview of '{doc.name}' frame {f} region x={r[0]} y={r[1]} {r[2]}x{r[3]} at {s}x zoom"
+        out.append(text(f"preview of '{doc.name}' frame {f} region x={r[0]} y={r[1]} {r[2]}x{r[3]} at {s}x zoom" + label
                         + (" (blue lines every 8 px)" if (a.get("grid") if a.get("grid") is not None else s >= 8) else "")
                         + (" (previous frame ghosted)" if a.get("onion") else "")))
         out.append(image(png))
@@ -816,7 +828,13 @@ def t_view(a):
         saved = doc.frame
         doc.frame = f
         try:
-            out.append(text(f"frame {f}\n" + render_grid(doc, region, layer)))
+            out.append(text(f"frame {f}\n" + render_grid(doc, region, layer, a.get("include_reference", False))))
+        except GridColorLimit:
+            if mode == "grid":
+                out.extend(t_view(dict(a, mode="image", include_reference=a.get("include_reference", False))))
+            out.append(text("Exact grid omitted: the region contains more colours than its one-character legend can "
+                            f"represent. Use the image to choose a detail, then request view with mode='grid', "
+                            f"x and y at that detail and width={min(6,r[2])}, height={min(6,r[3])}."))
         finally:
             doc.frame = saved
     return out
@@ -879,7 +897,12 @@ def t_export(a):
         written.append(p)
 
     if fmt == "gif":
-        frames = [scale_rgba(doc.w, doc.h, doc.composite(frame=f), scale) for f in fl]
+        frames = []
+        partial_alpha = False
+        for f in fl:
+            rgba = doc.composite(frame=f)
+            partial_alpha = partial_alpha or any(a not in (0, 255) for a in rgba[3::4])
+            frames.append(scale_rgba(doc.w, doc.h, rgba, scale))
         data, exact = encode_gif(doc.w * scale, doc.h * scale, frames, [doc.durations[f] for f in fl],
                                  loop=int(a.get("loop", 0)))
         with open(path, "wb") as fh:
@@ -888,7 +911,7 @@ def t_export(a):
         notes.append(f"{len(fl)} frame(s), durations {[doc.durations[f] for f in fl]} ms")
         if not exact:
             notes.append("more than 255 colors: colors were reduced for GIF")
-        if any(doc.composite(frame=f)[i] not in (0, 255) for f in fl for i in range(3, doc.w * doc.h * 4, 4)):
+        if partial_alpha:
             notes.append("GIF transparency is 1-bit: semi-transparent pixels were made opaque or transparent")
     elif fmt == "sheet":
         W, H, data = sheet_rgba(doc, fl, a.get("columns"), int(a.get("gap", 0)))
@@ -905,12 +928,16 @@ def t_export(a):
         if mode in ("separate", "both"):
             stem = path[:-4]
             for i, l in enumerate(doc.layers):
+                if l.reference:
+                    continue
                 safe = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in l.name)
                 write_png(f"{stem}_{i:02d}_{safe}.png", doc.w, doc.h, doc.composite(only_layer=i, frame=f))
         if doc.nframes > 1:
             notes.append(f"exported frame {f} only; use format 'gif', 'sheet' or 'frames' for the animation")
     else:
         raise ValueError(f"unknown format '{fmt}'")
+    if not written:
+        raise ValueError("no artwork layers or frames to export")
     doc.export_paths[fmt] = path  # remembered per format so e.g. a png export never lands on a frames file
     doc.last_export = written[0]
     msg = "wrote:\n" + "\n".join(written) + ("\n" + "\n".join(notes) if notes else "")
@@ -980,9 +1007,14 @@ def t_compare_reference(a):
             raise ValueError("no reference layer: import one with import_reference {into: 'layer'}")
         ri = refs[0]
     f = doc.frame_index(a.get("frame"))
-    w, h = doc.w, doc.h
-    draw_px = doc.composite(frame=f)
-    ref_px = doc.cel(ri, f)
+    region = a.get("region", [0, 0, doc.w, doc.h])
+    if not isinstance(region, (list, tuple)) or len(region) != 4 or any(type(v) is not int for v in region):
+        raise ValueError("region must be four integers [x, y, width, height]")
+    ox, oy, w, h = region
+    if min(ox, oy) < 0 or min(w, h) < 1 or ox + w > doc.w or oy + h > doc.h:
+        raise ValueError("comparison region must fit inside the canvas")
+    draw_px = doc.composite(region, frame=f)
+    ref_px = doc.composite(region, only_layer=ri, frame=f)
     cell = max(2, int(a.get("cell", 8)))
     labc = {}
 
@@ -1033,12 +1065,14 @@ def t_compare_reference(a):
             notes.append(f"colour off dE {de:.2f}" + (" (too light)" if dl > 0.04 else " (too dark)" if dl < -0.04 else " (hue/saturation)"))
         ranked.append((score, cx * cell, cy * cell, notes))
     ranked.sort(reverse=True)
-    lines = [f"compared drawing with reference layer #{ri} '{doc.layers[ri].name}' (frame {f}):",
-             f"overall: colour distance {fid['delta_e']:.3f} (blurred OKLab; lower = closer), "
+    overlap = sum(c["n"] for c in cells.values())
+    distance = f"{fid['delta_e']:.3f}" if overlap else "n/a (no overlapping artwork)"
+    lines = [f"compared drawing with reference layer #{ri} '{doc.layers[ri].name}' (frame {f}, region {ox},{oy} {w}x{h}):",
+             f"overall: colour distance {distance} (blurred OKLab; lower = closer), "
              f"{tot_missing} px missing, {tot_extra} px extra",
              f"worst {cell}x{cell} cells (x, y, w, h):"]
     for score, x, y, notes in ranked[:int(a.get("top", 8))]:
-        lines.append(f"  [{x}, {y}, {min(cell, w - x)}, {min(cell, h - y)}]: " + "; ".join(notes))
+        lines.append(f"  [{ox+x}, {oy+y}, {min(cell, w - x)}, {min(cell, h - y)}]: " + "; ".join(notes))
     if not ranked:
         lines.append("  none: the drawing matches the reference closely")
     gap = 2
@@ -1170,9 +1204,10 @@ TOOLS = [
     },
     {
         "name": "draw",
-        "description": "Draw on the current canvas with a batch of operations (one undo step; the whole batch is rolled back if any op fails). Put as much as possible into one call.\n" + OPS_DOC,
+        "description": "Draw a batch on one layer. See the ops parameter for drawing, shading, transform and face operations and their fields. The batch is one undo step and rolls back if any op fails. Inspect the artwork after each meaningful pass.",
         "inputSchema": {"type": "object", "properties": {
-            "ops": {"type": "array", "items": {"type": "object"}, "description": "List of op objects, e.g. {\"op\":\"rect\",\"x\":0,\"y\":0,\"w\":4,\"h\":4,\"color\":\"#ff0000\",\"fill\":true}"},
+            "ops": {"type": "array", "items": {"type": "object", "properties": {"op": {"type": "string"}}, "required": ["op"]},
+                    "description": OPS_DOC},
             "layer": {"description": "Layer index or name. Default: active layer.", "anyOf": [{"type": "integer"}, {"type": "string"}]},
             "frame": {"type": "integer", "description": "Frame to draw on. Default: current frame."},
             "frames": {"description": "Apply the same ops to several frames: \"all\" or a list of indices (e.g. a static background).",
@@ -1215,6 +1250,7 @@ TOOLS = [
                        "description": "Show several frames side by side (image only)."},
             "columns": {"type": "integer", "description": "Frames per row when showing several frames."},
             "onion": {"type": "boolean", "description": "Ghost the previous frame underneath (onion skin)."},
+            "include_reference": {"type": "boolean", "description": "For composite views, false shows artwork without reference layers. Images default to overlay on, text grids default to artwork only. An explicit layer shows that layer."},
             "x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"},
             "layer": {"description": "Show only this layer.", "anyOf": [{"type": "integer"}, {"type": "string"}]},
             "scale": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Zoom factor; default fits ~640px."},
@@ -1279,6 +1315,7 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "layer": {"anyOf": [{"type": "integer"}, {"type": "string"}], "description": "Reference layer (default: first reference layer)."},
             "cell": {"type": "integer", "minimum": 2, "description": "Cell size for the problem list (default 8)."},
+            "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4, "description": "Compare [x,y,width,height] only, e.g. a face or required prop. Reported locations use original canvas coordinates."},
             "top": {"type": "integer", "description": "How many problem cells to list (default 8)."},
             "scale": {"type": "integer"}, "frame": {"type": "integer"}, "canvas": {"type": "string"},
         }},
@@ -1300,7 +1337,7 @@ HANDLERS = {
 
 INSTRUCTIONS = """Headless pixel-art canvas for PixelLiner. Workflow: new_canvas (or open_image) -> palette -> draw (batch many ops; pixel_map rows are the fastest way to lay down a sprite) -> view to check -> fix with draw/undo -> export (PNG). Use layers for outline/colour/shading separation. Use view mode 'grid' for exact pixel coordinates.
 Animation: new_canvas {frames} or frame add (copies the current frame) -> draw {frame} only what changes -> view {frames:"all"} to compare -> export {format:"gif"} (or "sheet").
-Quality: work in passes on separate layers -- silhouette, flat colours, shade (form shading with a palette ramp), hand-refine light/shadow shapes, highlights, outline + selout, antialias, cleanup -- and view (zoomed) after every pass. A reference image (import_reference) gives far better shapes than drawing from memory. The 'pixel_art_workflow' prompt has the full method."""
+Quality: identify the requested pose, defining prop and expression. Draw silhouette, colours, then details in passes. Use view with include_reference:false at native size to judge readability. Use compare_reference with region:[x,y,width,height] for a detail with an aligned reference. Inspect the final artwork against the user's requirements. The 'pixel_art_workflow' prompt has the full method."""
 
 WORKFLOW = """You are drawing high-quality pixel art with the pixelliner tools. Work like a professional pixel artist, in passes, checking a zoomed `view` after each one and fixing problems before moving on.
 
@@ -1313,7 +1350,7 @@ WORKFLOW = """You are drawing high-quality pixel art with the pixelliner tools. 
 7. Lines: `outline` on the sprite layer (pixel-perfect by default), then `selout` so outlines take a darker shade of what they enclose and soften toward the light. Interior lines should use darker ramp colours, not black.
 8. Polish: `antialias` (snap to palette) on curved edges, then `cleanup` (orphans) to remove stray pixels; run `cleanup` doubles on hand-drawn single-colour lines before recolouring them. Inspect with view mode 'grid' around the face/hands and fix individual pixels.
 9. Animation: draw key poses first on separate frames, then in-betweens with `frame add` (copy) + `transform` (move/rotate limbs with RotSprite) + touch-ups. Keep volumes and colours consistent; use `view {frames:'all'}` and `onion` to check motion arcs. Use timing (frame durations) for weight: hold key poses longer.
-10. Export: `export` png (and gif/sheet for animation); open in PixelLiner only when the user asks.
+10. Check the brief before export. Name the requested defining details (pose, facing direction, silhouette, prop or accent). Inspect the artwork alone with view {include_reference:false,scale:1,grid:false}. Zoom in on doubtful details. With an aligned reference, use compare_reference {region:[x,y,width,height]} to locate a specific discrepancy. Fix the smallest useful area and inspect it again. lint flags technical issues; the brief and the visible artwork decide whether the request is met. Export png (and gif/sheet for animation); open in PixelLiner only when the user asks.
 Common mistakes to avoid: pillow shading (lighting from the outline inward), banding (parallel stair-step colour bands), jaggies on curves, too many colours, black outlines everywhere, noisy single pixels, inconsistent light direction."""
 
 PROMPTS = [{
