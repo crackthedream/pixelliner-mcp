@@ -107,6 +107,7 @@ def save_project(doc, folder):
     with existing callers. One writer per folder is recommended: overlapping writers
     can leave unused unique cels, which are deliberately not swept up.
     """
+    result_path = os.path.join(os.fspath(folder), "project.json")
     folder = os.path.abspath(os.fspath(folder))
     token = uuid.uuid4().hex
     layers = []
@@ -176,7 +177,7 @@ def save_project(doc, folder):
                 os.remove(candidate)
         except (OSError, ValueError):
             pass  # The new project is already committed; harmless old files can remain.
-    return path
+    return result_path
 
 
 def load_project(folder, name=None):

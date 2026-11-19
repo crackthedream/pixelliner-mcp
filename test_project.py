@@ -70,6 +70,16 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), kept)
         self.assertEqual(untracked.read_bytes(), kept)
 
+    def test_relative_folder_keeps_relative_return_value(self):
+        previous = os.getcwd()
+        try:
+            os.chdir(self.temporary.name)
+            result = project.save_project(self.doc, 'relative project')
+            self.assertEqual(result, os.path.join('relative project', 'project.json'))
+            self.assertEqual(project.load_project(result).name, self.doc.name)
+        finally:
+            os.chdir(previous)
+
     def test_interrupted_cel_write_preserves_previous_project(self):
         project.save_project(self.doc, self.folder)
         before = self.snapshot()
